@@ -1,0 +1,20 @@
+{
+  "POST /projects/": {
+    "notes": "`steps` cannot be set here: the server marks it read-only and ignores it (verified 2026-11-12)."
+  },
+  "PATCH /projects/{id}/": {
+    "notes": "Writable fields are name, description, available_locales, help_config, uploaded_documents and deleted_documents. A `steps` array is accepted with status 200 but ignored: the server marks it read-only, so this call does not add or change steps (verified 2026-11-12). Rename or rewire an existing step with `sdm projects steps patch`; configure it with the command of its type (`sdm mapping patch --action-id <step id>`, `sdm extension patch ...`)."
+  },
+  "PATCH /projects/{project_pk}/steps/{id}/": {
+    "notes": "`--id` is the step id from the project's `steps` array. The same id is the `--action-id` of the step-type commands and of `sdm steps hooks`."
+  },
+  "GET /steps/{action_id}/hooks/": {
+    "notes": "`--action-id` is a step id from a project's `steps` array."
+  },
+  "POST /steps/{action_id}/hooks/": {
+    "notes": "The API publishes no body schema for hooks and the shape has not been verified; read an existing hook with `sdm steps hooks get --action-id <step id>` and mirror its fields."
+  },
+  "POST /auth/token/": {
+    "notes": "Use `sdm login` instead, which also stores the key. Asking again with the same token_name returns the same key."
+  }
+}
