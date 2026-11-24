@@ -18,7 +18,7 @@ sdm projects get --all
 sdm projects get --id 4717
 sdm describe                   # index of every command
 sdm describe projects patch    # parameters and schemas as JSON
-sdm scope                      # limit this directory to chosen projects
+sdm scope                      # limit this directory to chosen projects, and record what is sent
 ```
 
 [AGENTS.md](AGENTS.md) is the full guide: the naming rule, bodies, output, exit

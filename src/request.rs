@@ -9,6 +9,7 @@ use reqwest::blocking::{Client, RequestBuilder, multipart};
 use serde_json::{Map, Value, json};
 
 use crate::error::{CliError, Result};
+use crate::history;
 use crate::output;
 use crate::scope::Scope;
 
@@ -318,7 +319,8 @@ impl Context {
             ..self.clone()
         }
         .url(&call)?;
-        let (body, _) = self.send(&client()?, &call, url)?;
+        // Not a command of the user's, so it stays out of the history.
+        let (_, (body, _)) = self.transmit(&client()?, &call, url)?;
         serde_json::from_slice(&body)
             .map_err(|err| CliError::Network(format!("{path} did not answer with JSON: {err}")))
     }
@@ -353,7 +355,22 @@ impl Context {
         self.send(&client()?, call, url)
     }
 
+    /// Sends `call` to `url` and records it in the directory's history.
     fn send(&self, client: &Client, call: &Call, url: Url) -> Result<(Vec<u8>, String)> {
+        let history = self
+            .scope
+            .as_ref()
+            .and_then(|scope| scope.history_dir(&call.method));
+        let recorded_url = history.as_ref().map(|_| url.clone());
+        let outcome = self.transmit(client, call, url);
+        if let (Some(dir), Some(url)) = (history, recorded_url) {
+            history::record(&dir, call, &url, &outcome);
+        }
+        outcome.map(|(_, answer)| answer)
+    }
+
+    /// Sends `call` to `url`; answers with the status, body and content type.
+    fn transmit(&self, client: &Client, call: &Call, url: Url) -> Result<(u16, (Vec<u8>, String))> {
         let method = reqwest::Method::from_bytes(call.method.as_bytes())
             .map_err(|_| CliError::usage(format!("unknown HTTP method {}", call.method)))?;
         let mut request = client.request(method, url);
@@ -388,7 +405,7 @@ impl Context {
                 body,
             }),
             400.. => Err(CliError::Api { status, body }),
-            _ => Ok((body, content_type)),
+            _ => Ok((status, (body, content_type))),
         }
     }
 

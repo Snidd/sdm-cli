@@ -12,7 +12,7 @@ use std::fmt;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use inquire::{Confirm, InquireError, MultiSelect, Select};
+use inquire::{Confirm, InquireError, MultiSelect, Select, Text};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -174,6 +174,21 @@ pub struct ScopeFile {
     pub projects: Vec<ProjectScope>,
     #[serde(default)]
     pub organization: BTreeMap<OrgGroup, Level>,
+    /// Directory that records every request sent, relative to the scope
+    /// file; `null` keeps no history.
+    #[serde(default = "default_history")]
+    pub history: Option<String>,
+    /// Record reads as well as writes.
+    #[serde(default)]
+    pub history_reads: bool,
+}
+
+/// Where history goes when the scope file does not say.
+pub const DEFAULT_HISTORY: &str = ".sdmhistory";
+
+#[allow(clippy::unnecessary_wraps)]
+fn default_history() -> Option<String> {
+    Some(DEFAULT_HISTORY.to_owned())
 }
 
 /// The scope in force, and the file it came from.
@@ -492,6 +507,18 @@ fn lookup(context: &Context, path: &str, what: &str) -> std::result::Result<Valu
 }
 
 impl Scope {
+    /// Directory a request with `method` is recorded in; `None` when history
+    /// is turned off, or the request is a read and reads are not recorded.
+    #[must_use]
+    pub fn history_dir(&self, method: &str) -> Option<PathBuf> {
+        let dir = self.data.history.as_ref()?;
+        if is_read(method) && !self.data.history_reads {
+            return None;
+        }
+        // `join` keeps an absolute `dir` as it is.
+        Some(self.file.parent()?.join(dir))
+    }
+
     /// Refuses `call` unless the scope allows it. `url` is the URL that would
     /// be requested. May read from the API to find the project a step, job or
     /// other object belongs to.
@@ -803,6 +830,12 @@ pub fn configure(context: &Context) -> Result<()> {
 
     let access = ask_access()?;
     let organization = ask_organization(previous.as_ref())?;
+    let history = ask_history(previous.as_ref())?;
+    let history_reads = history.is_some()
+        && Confirm::new("Record reads (GET) in the history too, not only writes?")
+            .with_default(previous.as_ref().is_some_and(|scope| scope.history_reads))
+            .prompt()
+            .map_err(prompt_error)?;
     let data = ScopeFile {
         version: VERSION,
         base_url: context.base_url.clone(),
@@ -815,6 +848,8 @@ pub fn configure(context: &Context) -> Result<()> {
             })
             .collect(),
         organization,
+        history,
+        history_reads,
     };
 
     let mut text = serde_json::to_string_pretty(&data).expect("a scope serializes");
@@ -894,6 +929,49 @@ fn ask_organization(previous: Option<&ScopeFile>) -> Result<BTreeMap<OrgGroup, L
         organization.insert(group, level);
     }
     Ok(organization)
+}
+
+fn ask_history(previous: Option<&ScopeFile>) -> Result<Option<String>> {
+    let before = previous.map_or_else(default_history, |scope| scope.history.clone());
+    let elsewhere = before
+        .as_deref()
+        .filter(|dir| *dir != DEFAULT_HISTORY)
+        .map(|dir| format!("Keep it in {dir}"));
+    let mut choices = vec![format!(
+        "Keep it in {DEFAULT_HISTORY}, next to the scope file"
+    )];
+    choices.extend(elsewhere.clone());
+    choices.push("Keep it in another directory".to_owned());
+    choices.push("Keep no history".to_owned());
+    let other = choices.len() - 2;
+    let cursor = match (&before, &elsewhere) {
+        (None, _) => other + 1,
+        (Some(_), Some(_)) => 1,
+        (Some(_), None) => 0,
+    };
+
+    let answer = Select::new("History of the changes sent from this directory:", choices)
+        .with_starting_cursor(cursor)
+        .raw_prompt()
+        .map_err(prompt_error)?
+        .index;
+    Ok(match answer {
+        0 => default_history(),
+        index if index < other => before,
+        index if index == other => {
+            let dir = Text::new("History directory (relative to the scope file, or absolute):")
+                .prompt()
+                .map_err(prompt_error)?;
+            let dir = dir.trim();
+            if dir.is_empty() {
+                return Err(CliError::usage(
+                    "no history directory given; the scope is unchanged",
+                ));
+            }
+            Some(dir.to_owned())
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]
@@ -1050,6 +1128,11 @@ mod tests {
 
         assert_eq!(scope.projects[0].access[&Group::Jobs], Level::Write);
         assert!(scope.organization.is_empty());
+        assert_eq!(scope.history.as_deref(), Some(DEFAULT_HISTORY));
+        let silent =
+            parse(&good.replace(r#""version":1"#, r#""version":1,"history":null"#)).unwrap();
+        assert_eq!(silent.history, None);
+        assert!(!scope.history_reads);
         assert!(parse(&good.replace(r#""version":1"#, r#""version":2"#)).is_err());
         assert!(parse(&good.replace("jobs", "everything")).is_err());
         assert!(parse(&good.replace(r#""write""#, r#""admin""#)).is_err());

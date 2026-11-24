@@ -131,6 +131,26 @@ Inside a scope:
   `job-media-archive`.
 - `login`, `logout`, `whoami`, `describe` and `spec` work as usual.
 
+### History
+
+Every write sent from a scoped directory (anything but a `GET`) is appended
+to a history, by default in `.sdmhistory/` next to the scope file: one file per UTC day
+(`2026-11-24.jsonl`), one JSON object per line.
+
+```json
+{"time":"2026-11-24T09:15:02Z","command":["projects","patch","--id","4717","--field","name=x"],"method":"PATCH","url":"https://sdm.akeneo.cloud/api/v1/projects/4717/","body":{"name":"x"},"status":200}
+```
+
+- `command` is the command line (the `--token` value is hidden), `body` is
+  what was sent (uploads by file path), `status` is the API's answer, or
+  `error` when no answer came. Responses are not kept.
+- Reads are recorded only when the scope file has `"history_reads": true`;
+  each page of `--all` is then one line. Refused requests, `--dry-run` and the
+  scope check's own lookups are never recorded.
+- The `history` key of the scope file names the directory, relative to the
+  scope file or absolute; `null` turns history off. `sdm scope` asks for it.
+- The history is meant to be committed. Do not edit or delete it.
+
 The error message says what was needed and what the scope allows. Do not edit
 or remove the scope file to get past a refusal; ask the user.
 

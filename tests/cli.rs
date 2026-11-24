@@ -422,3 +422,68 @@ fn the_scope_can_be_read_but_not_changed_without_a_terminal() {
     assert_eq!(clear.status.code(), Some(2));
     assert!(dir.join(".sdm-scope.json").exists());
 }
+
+#[test]
+fn sent_requests_are_recorded_in_the_history_directory() {
+    let (base_url, _request) = serve(vec![
+        (200, r#"{"id":7}"#),
+        (200, r#"{"id":7}"#),
+        (404, r#"{"detail":"x"}"#),
+    ]);
+    let dir = scoped_dir("history", &base_url);
+
+    sdm_in(
+        &dir.join("nested"),
+        &base_url,
+        &["projects", "patch", "--id", "7", "--field", "name=x"],
+    );
+    // Not recorded: a read, two refusals and a preview.
+    sdm_in(&dir, &base_url, &["projects", "get", "--id", "7"]);
+    sdm_in(&dir, &base_url, &["projects", "patch", "--id", "8"]);
+    sdm_in(
+        &dir,
+        &base_url,
+        &["projects", "delete", "--id", "7", "--yes"],
+    );
+    sdm_in(
+        &dir,
+        &base_url,
+        &["projects", "patch", "--id", "7", "--dry-run"],
+    );
+    sdm_in(
+        &dir,
+        &base_url,
+        &["projects", "rules", "post", "--project-pk", "7"],
+    );
+
+    let files: Vec<PathBuf> = std::fs::read_dir(dir.join(".sdmhistory"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1, "{files:?}");
+    let history = std::fs::read_to_string(&files[0]).unwrap();
+    let lines: Vec<&str> = history.lines().collect();
+    assert_eq!(lines.len(), 2, "{history}");
+    assert!(lines[0].contains(r#""command":["projects","patch","--id","7","--field","name=x"]"#));
+    assert!(lines[0].contains(r#""method":"PATCH""#));
+    assert!(lines[0].contains(r#"/api/v1/projects/7/","body":{"name":"x"},"status":200"#));
+    assert!(lines[1].contains(r#""method":"POST""#) && lines[1].contains(r#""status":404"#));
+    assert!(!history.contains("secret-key"));
+}
+
+#[test]
+fn history_can_be_moved_turned_off_and_include_reads() {
+    let (base_url, _request) = serve(vec![(200, "{}"), (200, "{}")]);
+    let dir = scoped_dir("history-off", &base_url);
+    let file = dir.join(".sdm-scope.json");
+    let scope = std::fs::read_to_string(&file).unwrap();
+    let with_history = |value: &str| scope.replacen("{", &format!(r#"{{"history":{value},"#), 1);
+
+    std::fs::write(&file, with_history(r#""log/sdm","history_reads":true"#)).unwrap();
+    sdm_in(&dir, &base_url, &["projects", "get", "--id", "7"]);
+    std::fs::write(&file, with_history("null")).unwrap();
+    sdm_in(&dir, &base_url, &["projects", "patch", "--id", "7"]);
+
+    assert_eq!(std::fs::read_dir(dir.join("log/sdm")).unwrap().count(), 1);
+    assert!(!dir.join(".sdmhistory").exists());
+}

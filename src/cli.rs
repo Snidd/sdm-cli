@@ -181,6 +181,9 @@ fn builtin_commands() -> Vec<Command> {
                  read, write or delete, each including the ones before. The default is write \
                  everywhere, so nothing can be deleted. Organization-wide data (files, bases, \
                  input_formats, users, organization, tasks) is closed unless opened here.\n\n\
+                 Every write sent from a scoped directory (and reads, when asked for) is recorded in a history \
+                 directory (.sdmhistory next to the scope file unless changed or turned off \
+                 here), one JSON line per request, for committing.\n\n\
                  Changing or clearing the scope needs a terminal. No flag or environment \
                  variable overrides a scope.",
             )
