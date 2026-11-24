@@ -2,6 +2,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
@@ -9,10 +10,29 @@ use std::thread;
 /// Serves exactly one request with the given status and JSON body, and hands
 /// back the raw request (head and body) that was received.
 fn serve_once(status: u16, body: &'static str) -> (String, Receiver<String>) {
+    serve(vec![(status, body)])
+}
+
+/// Serves one request per answer, in order, and hands back each raw request.
+fn serve(answers: Vec<(u16, &'static str)>) -> (String, Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let (sender, receiver) = channel();
     thread::spawn(move || {
+        for (status, body) in answers {
+            answer(&listener, &sender, status, body);
+        }
+    });
+    (base_url, receiver)
+}
+
+fn answer(
+    listener: &TcpListener,
+    sender: &std::sync::mpsc::Sender<String>,
+    status: u16,
+    body: &str,
+) {
+    {
         let (stream, _) = listener.accept().unwrap();
         let mut reader = BufReader::new(stream);
         let mut head = String::new();
@@ -38,14 +58,19 @@ fn serve_once(status: u16, body: &'static str) -> (String, Receiver<String>) {
             body.len()
         );
         reader.get_mut().write_all(response.as_bytes()).unwrap();
-    });
-    (base_url, receiver)
+    }
 }
 
 fn sdm(base_url: &str, args: &[&str]) -> Output {
+    // A directory with no scope file above it.
+    sdm_in(&std::env::temp_dir(), base_url, args)
+}
+
+fn sdm_in(dir: &Path, base_url: &str, args: &[&str]) -> Output {
     let home = std::env::temp_dir().join(format!("sdm-cli-test-{}", std::process::id()));
     Command::new(env!("CARGO_BIN_EXE_sdm"))
         .args(args)
+        .current_dir(dir)
         .env("SDM_BASE_URL", base_url)
         .env("SDM_TOKEN", "secret-key-1234")
         // Keep the developer's real credentials and cached spec out of it.
@@ -188,4 +213,212 @@ fn dry_run_prints_the_request_and_masks_the_key() {
     );
     assert!(stdout.contains("Token ****1234"));
     assert!(!stdout.contains("secret-key"));
+}
+
+/// Never contacted: a refusal happens before any request.
+const UNREACHABLE: &str = "http://127.0.0.1:9";
+
+/// A fresh directory scoped to project 7 on `base_url`: every group at
+/// `write`, organization-wide data closed except for reading files.
+fn scoped_dir(name: &str, base_url: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sdm-cli-scope-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("nested")).unwrap();
+    let scope = format!(
+        r#"{{"version":1,"base_url":"{base_url}","projects":[{{"id":7,"name":"Demo","access":{{
+            "project":"write","steps":"write","jobs":"write","rules":"write","hooks":"write",
+            "options_collections":"write","portals":"write","outputs":"write",
+            "connectors":"write","metrics":"write"}}}}],
+            "organization":{{"files":"read"}}}}"#
+    );
+    std::fs::write(dir.join(".sdm-scope.json"), scope).unwrap();
+    dir
+}
+
+fn refusal(output: &Output) -> String {
+    assert_eq!(output.status.code(), Some(6), "{output:?}");
+    assert!(output.stdout.is_empty());
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn a_scoped_project_is_reachable_from_the_directory_and_below() {
+    let (base_url, request) = serve_once(200, r#"{"id":7}"#);
+    let dir = scoped_dir("inside", &base_url);
+
+    let output = sdm_in(
+        &dir.join("nested"),
+        &base_url,
+        &["projects", "patch", "--id", "7", "--field", "name=x"],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        request
+            .recv()
+            .unwrap()
+            .starts_with("PATCH /api/v1/projects/7/ ")
+    );
+}
+
+#[test]
+fn another_project_is_refused_and_nothing_is_sent() {
+    let dir = scoped_dir("other", UNREACHABLE);
+
+    let by_command = sdm_in(&dir, UNREACHABLE, &["projects", "get", "--id", "8"]);
+    let by_raw_path = sdm_in(&dir, UNREACHABLE, &["api", "GET", "/projects/7/../8/"]);
+    let by_filter = sdm_in(&dir, UNREACHABLE, &["jobs", "get", "--project", "8"]);
+    let by_body = sdm_in(
+        &dir,
+        UNREACHABLE,
+        &["jobs", "post", "--field", "project:=8", "--dry-run"],
+    );
+
+    for output in [by_command, by_raw_path, by_filter, by_body] {
+        let message = refusal(&output);
+        assert!(
+            message.contains("project 8 is not in the scope"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn deleting_is_refused_at_the_write_level() {
+    let dir = scoped_dir("delete", UNREACHABLE);
+
+    let delete = sdm_in(
+        &dir,
+        UNREACHABLE,
+        &["projects", "delete", "--id", "7", "--yes"],
+    );
+    let rule = sdm_in(
+        &dir,
+        UNREACHABLE,
+        &[
+            "projects",
+            "rules",
+            "delete",
+            "--project-pk",
+            "7",
+            "--rule-pk",
+            "1",
+            "--yes",
+        ],
+    );
+
+    assert!(refusal(&delete).contains("needs 'delete' on project of project 7"));
+    assert!(refusal(&rule).contains("needs 'delete' on rules of project 7"));
+}
+
+#[test]
+fn requests_that_cannot_be_placed_in_a_project_are_refused() {
+    let dir = scoped_dir("unplaced", UNREACHABLE);
+    let refused: [&[&str]; 7] = [
+        &["projects", "get"],
+        &["jobs", "get"],
+        &["bases", "get"],
+        &["files", "post", "--field", "name=x"],
+        &["api", "GET", "/api/v2/projects/7/"],
+        &["api", "GET", "/something/new/"],
+        &[
+            "projects",
+            "get",
+            "--id",
+            "7",
+            "--base-url",
+            "http://127.0.0.1:10",
+        ],
+    ];
+
+    for args in refused {
+        let output = sdm_in(&dir, UNREACHABLE, args);
+        refusal(&output);
+    }
+}
+
+#[test]
+fn opened_organization_data_is_reachable_at_its_level() {
+    let (base_url, request) = serve_once(200, r#"{"results":[]}"#);
+    let dir = scoped_dir("org", &base_url);
+
+    let output = sdm_in(&dir, &base_url, &["files", "get"]);
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(request.recv().unwrap().starts_with("GET /api/v1/files/ "));
+}
+
+#[test]
+fn a_step_is_placed_by_reading_the_scoped_project() {
+    let (base_url, request) = serve(vec![
+        (200, r#"{"id":7,"steps":[{"id":70},{"id":71}]}"#),
+        (200, r#"{"ok":true}"#),
+    ]);
+    let dir = scoped_dir("step", &base_url);
+
+    let output = sdm_in(
+        &dir,
+        &base_url,
+        &["mapping", "patch", "--action-id", "71", "--field", "a=b"],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        request
+            .recv()
+            .unwrap()
+            .starts_with("GET /api/v1/projects/7/ ")
+    );
+    assert!(
+        request
+            .recv()
+            .unwrap()
+            .starts_with("PATCH /api/v1/mapping/71/ ")
+    );
+}
+
+#[test]
+fn a_step_of_another_project_is_refused() {
+    let (base_url, _request) = serve_once(200, r#"{"id":7,"steps":[{"id":70}]}"#);
+    let dir = scoped_dir("foreign-step", &base_url);
+
+    let output = sdm_in(&dir, &base_url, &["mapping", "get", "--action-id", "99"]);
+
+    assert!(refusal(&output).contains("step 99 is not a step of a scoped project"));
+}
+
+#[test]
+fn a_job_is_placed_by_reading_it() {
+    let (base_url, _request) = serve_once(200, r#"{"id":"j1","project":8}"#);
+    let dir = scoped_dir("job", &base_url);
+
+    let output = sdm_in(&dir, &base_url, &["jobs", "get", "--id", "j1"]);
+
+    assert!(refusal(&output).contains("job j1 belongs elsewhere"));
+}
+
+#[test]
+fn a_damaged_scope_file_refuses_everything() {
+    let dir = scoped_dir("damaged", UNREACHABLE);
+    std::fs::write(dir.join(".sdm-scope.json"), r#"{"version":1"#).unwrap();
+
+    let output = sdm_in(&dir, UNREACHABLE, &["projects", "get", "--id", "7"]);
+
+    assert!(refusal(&output).contains("cannot use scope file"));
+}
+
+#[test]
+fn the_scope_can_be_read_but_not_changed_without_a_terminal() {
+    let dir = scoped_dir("show", UNREACHABLE);
+
+    let show = sdm_in(&dir, UNREACHABLE, &["scope", "show"]);
+    let change = sdm_in(&dir, UNREACHABLE, &["scope"]);
+    let clear = sdm_in(&dir, UNREACHABLE, &["scope", "clear", "--yes"]);
+
+    let shown = String::from_utf8_lossy(&show.stdout);
+    assert_eq!(show.status.code(), Some(0));
+    assert!(shown.contains(r#""id":7"#), "{shown}");
+    assert!(shown.contains(".sdm-scope.json"));
+    assert_eq!(change.status.code(), Some(2));
+    assert_eq!(clear.status.code(), Some(2));
+    assert!(dir.join(".sdm-scope.json").exists());
 }

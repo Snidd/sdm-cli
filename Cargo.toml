@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4.6.7", features = ["string", "env", "cargo"] }
 dirs = "7.0.0"
+inquire = { version = "0.9.5", default-features = false, features = ["crossterm", "fuzzy"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "multipart", "rustls", "query", "gzip"] }
 rpassword = "7.5.5"
 serde = { version = "1.0.229", features = ["derive"] }

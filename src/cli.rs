@@ -10,11 +10,13 @@ use crate::credentials::{self, Credentials};
 use crate::error::{CliError, Result};
 use crate::request::{self, Body, Call, Context};
 use crate::spec::{self, API_PREFIX, Node, Operation, Spec, SpecSource, flag_name};
-use crate::{describe, output};
+use crate::{describe, output, scope};
 
 const DEFAULT_BASE_URL: &str = "https://sdm.akeneo.cloud";
 const GLOBAL_HEADING: &str = "Global options";
-const BUILTINS: [&str; 6] = ["login", "logout", "whoami", "spec", "describe", "api"];
+const BUILTINS: [&str; 7] = [
+    "login", "logout", "whoami", "scope", "spec", "describe", "api",
+];
 
 /// Parses the process arguments and runs the selected command.
 ///
@@ -42,7 +44,8 @@ pub fn build(spec: &Spec, tree: &Node) -> Command {
              GET   /api/v1/projects/{id}/                   sdm projects get --id 3\n  \
              PATCH /api/v1/projects/{project_pk}/steps/{id}/  sdm projects steps patch --project-pk 1 --id 2\n\n\
              Output is the API's JSON on stdout; errors are JSON on stderr. Exit codes: 0 ok, \
-             2 usage, 3 authentication, 4 API error, 5 network.",
+             2 usage, 3 authentication, 4 API error, 5 network, 6 outside the directory's scope \
+             (see `sdm scope --help`).",
         )
         .after_help(
             "Run `sdm describe` for an index of every command, and `sdm describe <command...>` \
@@ -166,6 +169,24 @@ fn builtin_commands() -> Vec<Command> {
         Command::new("logout")
             .about("Delete the stored API key (the key itself stays valid until revoked in SDM)"),
         Command::new("whoami").about("Show the logged-in user (GET /api/v1/users/me/)"),
+        Command::new("scope")
+            .about("Limit this directory to chosen projects (interactive)")
+            .long_about(
+                "Choose which projects, and what inside them, the CLI may touch when it is run \
+                 from this directory or below. The answer is saved as .sdm-scope.json in the \
+                 current directory; later commands that fall outside it are refused with exit \
+                 code 6 before anything is sent.\n\n\
+                 Each group of a project (project, steps, jobs, rules, hooks, \
+                 options_collections, portals, outputs, connectors, metrics) gets a level: none, \
+                 read, write or delete, each including the ones before. The default is write \
+                 everywhere, so nothing can be deleted. Organization-wide data (files, bases, \
+                 input_formats, users, organization, tasks) is closed unless opened here.\n\n\
+                 Changing or clearing the scope needs a terminal. No flag or environment \
+                 variable overrides a scope.",
+            )
+            .disable_help_subcommand(true)
+            .subcommand(Command::new("show").about("Print the scope in force and its file as JSON"))
+            .subcommand(Command::new("clear").about("Remove the scope file in force (asks first)")),
         Command::new("spec")
             .about("Manage the API spec that commands are generated from")
             .subcommand_required(true)
@@ -356,6 +377,11 @@ fn dispatch(spec: &Spec, tree: &Node, matches: &ArgMatches) -> Result<()> {
             body: Body::None,
             all: false,
         }),
+        "scope" => match sub.subcommand() {
+            Some(("show", _)) => scope::show(),
+            Some(("clear", _)) => scope::clear(),
+            _ => scope::configure(&unscoped_context(sub)?),
+        },
         "spec" => spec_command(spec, sub),
         "describe" => {
             let tokens: Vec<String> = sub
@@ -499,9 +525,17 @@ fn required<'a>(matches: &'a ArgMatches, id: &str) -> Result<&'a str> {
         .ok_or_else(|| CliError::usage(format!("missing <{id}>")))
 }
 
+/// The context every command runs in: host, key and the directory's scope.
+fn context(matches: &ArgMatches) -> Result<Context> {
+    Ok(Context {
+        scope: scope::load()?,
+        ..unscoped_context(matches)?
+    })
+}
+
 /// Resolves host and key. Order: flag, environment, credentials file, default.
 /// The stored key is only used for the host it was issued by.
-fn context(matches: &ArgMatches) -> Result<Context> {
+fn unscoped_context(matches: &ArgMatches) -> Result<Context> {
     let stored = credentials::load();
     let base_url = text(matches, "base-url")
         .or_else(|| stored.as_ref().map(|c| c.base_url.clone()))
@@ -528,6 +562,7 @@ fn context(matches: &ArgMatches) -> Result<Context> {
         yes: flag(matches, "yes"),
         output: text(matches, "output"),
         extra_query,
+        scope: None,
     })
 }
 

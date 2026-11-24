@@ -71,7 +71,8 @@ fields are not removed.
 - stdout is the API's JSON, unchanged (compact when piped). Filter with `jq`.
 - Errors are JSON on stderr: the API's own body, or
   `{"status_code", "message", "errors"}` for failures inside the CLI.
-- Exit codes: `0` ok, `2` usage, `3` authentication, `4` API error, `5` network.
+- Exit codes: `0` ok, `2` usage, `3` authentication, `4` API error, `5` network,
+  `6` outside the directory's scope.
 - Lists are paginated: `--page`, `--page-size`, or `--all` to get every result
   as one JSON array.
 - Binary downloads need `--output <file>`.
@@ -85,6 +86,53 @@ fields are not removed.
   (`jobs bulk-delete post`, `bases delete-rows post`, `mapping memory bulk-delete post`,
   `hooks rotate-secret post`) and do not ask.
 - `sdm whoami` shows which organization the key belongs to.
+- A directory can be limited to chosen projects; see Scope below.
+
+## Scope
+
+A directory with a `.sdm-scope.json` file (in it or in a parent) is scoped:
+the CLI refuses, with exit code `6` and before sending anything, every request
+that is not allowed by the file. Refusals apply to `--dry-run` and `sdm api`
+too. No flag or environment variable overrides a scope.
+
+```sh
+sdm scope show    # the scope in force and its file, as JSON; null when unscoped
+sdm scope         # choose projects and access (a person at a terminal only)
+sdm scope clear   # remove the scope file (a person at a terminal only)
+```
+
+The file lists projects, and a level for each group inside a project:
+`project`, `steps`, `jobs`, `rules`, `hooks`, `options_collections`,
+`portals`, `outputs`, `connectors`, `metrics`. Levels are `none`, `read`,
+`write`, `delete`; each includes the ones before. `sdm scope` sets `write`
+everywhere unless told otherwise, so nothing can be deleted. `delete` is
+needed for `DELETE` and for the destructive `post`/`patch` commands
+(`bulk-delete`, `clear-all`, `delete-rows`, `rotate-secret`,
+`product-models delete`).
+
+Inside a scope:
+
+- Lists need their project filter: `sdm jobs get --project 4717`, likewise
+  `options_collections`, `outputs`, `portals`, `metrics`;
+  `sdm connectors status get --project-id 4717`; `sdm options get --collection <id>`;
+  `sdm media get --uploaded-for-job <job id>`. `sdm projects get` without
+  `--id` is refused.
+- A body that creates something must name a scoped project (`project`, or
+  `project_id` for portals).
+- Commands addressed by a step, job, hook or other object id cost one or more
+  extra `GET`s: the CLI reads the object to find its project first.
+- Organization-wide data (`files`, `bases`, `input_formats`, `users`,
+  `organization`, `tasks`) is refused unless the file opens it under
+  `organization`. Creating a job needs a file, so `files` must be opened at
+  `write` to upload one.
+- Paths the check cannot tie to a project are refused: other API versions,
+  paths the spec does not list, `portals bulk-create`, `connectors akeneo`,
+  `metrics xlsx`, `options get --id`, `documents`, `step-completion`,
+  `job-media-archive`.
+- `login`, `logout`, `whoami`, `describe` and `spec` work as usual.
+
+The error message says what was needed and what the scope allows. Do not edit
+or remove the scope file to get past a refusal; ask the user.
 
 ## Steps
 

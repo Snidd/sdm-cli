@@ -18,10 +18,11 @@ sdm projects get --all
 sdm projects get --id 4717
 sdm describe                   # index of every command
 sdm describe projects patch    # parameters and schemas as JSON
+sdm scope                      # limit this directory to chosen projects
 ```
 
 [AGENTS.md](AGENTS.md) is the full guide: the naming rule, bodies, output, exit
-codes, safety flags, and what is known about steps and hooks.
+codes, safety flags, scopes, and what is known about steps and hooks.
 
 ## Development
 
@@ -36,4 +37,5 @@ cargo clippy --all-targets
 - `spec/overlay.json` holds notes for calls the spec documents badly. Keys are
   `"METHOD /path"`; `notes` is shown in `--help` and `sdm describe`.
 - `src/spec.rs` builds the command tree, `src/cli.rs` the command line,
-  `src/request.rs` the HTTP calls.
+  `src/request.rs` the HTTP calls, `src/scope.rs` the per-directory scope
+  (`.sdm-scope.json`) and its check.

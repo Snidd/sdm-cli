@@ -10,6 +10,7 @@ use serde_json::{Map, Value, json};
 
 use crate::error::{CliError, Result};
 use crate::output;
+use crate::scope::Scope;
 
 /// Settings shared by every call, taken from flags, environment and the
 /// credentials file.
@@ -23,6 +24,8 @@ pub struct Context {
     pub output: Option<String>,
     /// Extra `--query key=value` pairs.
     pub extra_query: Vec<(String, String)>,
+    /// Limits of the current directory, when it has a scope file.
+    pub scope: Option<Scope>,
 }
 
 /// Request payload.
@@ -215,14 +218,24 @@ impl Context {
         })
     }
 
-    /// Runs `call` and prints the result, honouring `--dry-run`, delete
-    /// confirmation, `--all` and `--output`.
+    /// Refuses a call that falls outside the directory's scope. Runs before
+    /// `--dry-run` too, so a preview shows the refusal.
+    fn check_scope(&self, call: &Call, url: &Url) -> Result<()> {
+        match &self.scope {
+            Some(scope) => scope.check(self, call, url),
+            None => Ok(()),
+        }
+    }
+
+    /// Runs `call` and prints the result, honouring the scope, `--dry-run`,
+    /// delete confirmation, `--all` and `--output`.
     ///
     /// # Errors
-    /// Returns the matching [`CliError`] for usage, auth, API and network
-    /// failures.
+    /// Returns the matching [`CliError`] for usage, scope, auth, API and
+    /// network failures.
     pub fn execute(&self, call: &Call) -> Result<()> {
         let url = self.url(call)?;
+        self.check_scope(call, &url)?;
         if self.dry_run {
             output::print_json(&self.describe_call(call, &url));
             return Ok(());
@@ -238,12 +251,25 @@ impl Context {
         }
 
         // `--all`: keep requesting while the answer is a page with a `next` link.
-        let Some((mut results, mut next)) = split_page(&body) else {
+        let Some((results, next)) = split_page(&body) else {
             return output::emit_body(&body, &content_type, self.output.as_deref());
         };
+        let results = self.following_pages(&client, call, results, next)?;
+        let combined = serde_json::to_vec(&Value::Array(results)).expect("JSON serializes");
+        output::emit_body(&combined, "application/json", self.output.as_deref())
+    }
+
+    /// Adds the results of every page after the first to `results`.
+    fn following_pages(
+        &self,
+        client: &Client,
+        call: &Call,
+        mut results: Vec<Value>,
+        mut next: Option<String>,
+    ) -> Result<Vec<Value>> {
         while let Some(link) = next {
             let page_url = self.next_url(call, &link)?;
-            let (body, _) = self.send(&client, call, page_url)?;
+            let (body, _) = self.send(client, call, page_url)?;
             let Some((more, following)) = split_page(&body) else {
                 return Err(CliError::Network(
                     "a page of an --all request was not a paginated answer".to_owned(),
@@ -252,8 +278,49 @@ impl Context {
             results.extend(more);
             next = following;
         }
-        let combined = serde_json::to_vec(&Value::Array(results)).expect("JSON serializes");
-        output::emit_body(&combined, "application/json", self.output.as_deref())
+        Ok(results)
+    }
+
+    /// Every result of a paginated list, without printing anything.
+    ///
+    /// # Errors
+    /// Returns the matching [`CliError`] for scope, auth, API and network
+    /// failures, and a network error when the answer is not a list.
+    pub fn list_all(&self, call: &Call) -> Result<Vec<Value>> {
+        let url = self.url(call)?;
+        self.check_scope(call, &url)?;
+        let client = client()?;
+        let (body, _) = self.send(&client, call, url)?;
+        if let Some((results, next)) = split_page(&body) {
+            return self.following_pages(&client, call, results, next);
+        }
+        match serde_json::from_slice(&body) {
+            Ok(Value::Array(results)) => Ok(results),
+            _ => Err(CliError::Network(format!(
+                "{} did not answer with a list",
+                call.path
+            ))),
+        }
+    }
+
+    /// GETs `path` as JSON for the scope check itself, which is why the
+    /// request is not checked against the scope.
+    pub(crate) fn lookup(&self, path: &str) -> Result<Value> {
+        let call = Call {
+            method: "GET".to_owned(),
+            path: path.to_owned(),
+            query: Vec::new(),
+            body: Body::None,
+            all: false,
+        };
+        let url = Self {
+            extra_query: Vec::new(),
+            ..self.clone()
+        }
+        .url(&call)?;
+        let (body, _) = self.send(&client()?, &call, url)?;
+        serde_json::from_slice(&body)
+            .map_err(|err| CliError::Network(format!("{path} did not answer with JSON: {err}")))
     }
 
     /// The `next` link points wherever the server thinks it lives; only its
@@ -278,9 +345,12 @@ impl Context {
     /// without printing anything.
     ///
     /// # Errors
-    /// Returns the matching [`CliError`] for auth, API and network failures.
+    /// Returns the matching [`CliError`] for scope, auth, API and network
+    /// failures.
     pub fn request(&self, call: &Call) -> Result<(Vec<u8>, String)> {
-        self.send(&client()?, call, self.url(call)?)
+        let url = self.url(call)?;
+        self.check_scope(call, &url)?;
+        self.send(&client()?, call, url)
     }
 
     fn send(&self, client: &Client, call: &Call, url: Url) -> Result<(Vec<u8>, String)> {
@@ -501,6 +571,7 @@ mod tests {
             yes: false,
             output: None,
             extra_query: vec![("x".to_owned(), "1".to_owned())],
+            scope: None,
         };
         let call = Call {
             method: "GET".to_owned(),

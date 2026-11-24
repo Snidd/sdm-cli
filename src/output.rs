@@ -78,7 +78,7 @@ pub fn print_error(err: &CliError) {
             }
             render(&value, pretty)
         }
-        CliError::Usage(message) | CliError::Network(message) => render(
+        CliError::Usage(message) | CliError::Network(message) | CliError::Scope(message) => render(
             &json!({ "status_code": null, "message": message, "errors": [] }),
             pretty,
         ),

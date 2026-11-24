@@ -21,6 +21,9 @@ pub enum CliError {
     /// The request never got an HTTP answer (exit 5).
     #[error("{0}")]
     Network(String),
+    /// The request falls outside the directory's scope file (exit 6).
+    #[error("{0}")]
+    Scope(String),
 }
 
 impl CliError {
@@ -32,6 +35,7 @@ impl CliError {
             Self::Auth { .. } => 3,
             Self::Api { .. } => 4,
             Self::Network(_) => 5,
+            Self::Scope(_) => 6,
         }
     }
 
