@@ -44,6 +44,7 @@ existing object with the matching `get` and mirror its fields.
 sdm login            # prompts; or set SDM_EMAIL and SDM_PASSWORD
 sdm whoami
 sdm logout
+sdm version          # the installed version, as JSON; `sdm --version` as text
 ```
 
 The key is stored in `~/.config/sdm/credentials.json` (mode 0600). `SDM_TOKEN`
@@ -136,8 +137,8 @@ Inside a scope:
   paths the spec does not list, `portals bulk-create`, `connectors akeneo`,
   `metrics xlsx`, `options get --id`, `documents`, `step-completion`,
   `job-media-archive`.
-- `login`, `logout`, `whoami`, `describe`, `spec` and `skill` work as usual,
-  and need no scope file.
+- `login`, `logout`, `whoami`, `version`, `describe`, `spec` and `skill` work
+  as usual, and need no scope file.
 
 ### History
 
@@ -238,3 +239,10 @@ sdm spec info     # which spec is active
 sdm spec update   # download the host's current spec and use it from now on
 sdm spec reset    # go back to the spec built into the binary
 ```
+
+## Changing `sdm` itself
+
+This guide is about using `sdm`. Before changing this repository, read
+`CONTRIBUTING.md` in its root: every change to the code, the spec or the skill
+raises the version in `Cargo.toml`, and it describes how a release reaches
+crates.io.

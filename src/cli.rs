@@ -14,8 +14,8 @@ use crate::{describe, output, scope, skill};
 
 const DEFAULT_BASE_URL: &str = "https://sdm.akeneo.cloud";
 const GLOBAL_HEADING: &str = "Global options";
-const BUILTINS: [&str; 8] = [
-    "login", "logout", "whoami", "scope", "spec", "skill", "describe", "api",
+const BUILTINS: [&str; 9] = [
+    "login", "logout", "whoami", "version", "scope", "spec", "skill", "describe", "api",
 ];
 
 /// Parses the process arguments and runs the selected command.
@@ -175,6 +175,7 @@ fn builtin_commands() -> Vec<Command> {
         Command::new("logout")
             .about("Delete the stored API key (the key itself stays valid until revoked in SDM)"),
         Command::new("whoami").about("Show the logged-in user (GET /api/v1/users/me/)"),
+        Command::new("version").about("Show the version of sdm as JSON"),
         Command::new("scope")
             .about("Limit this directory to chosen projects (interactive)")
             .long_about(
@@ -445,6 +446,13 @@ fn dispatch(spec: &Spec, tree: &Node, matches: &ArgMatches) -> Result<()> {
             body: Body::None,
             all: false,
         }),
+        "version" => {
+            output::print_json(&json!({
+                "name": env!("CARGO_PKG_NAME"),
+                "version": env!("CARGO_PKG_VERSION"),
+            }));
+            Ok(())
+        }
         "scope" => match sub.subcommand() {
             Some(("show", _)) => scope::show(),
             Some(("clear", _)) => scope::clear(),

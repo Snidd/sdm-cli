@@ -191,6 +191,9 @@ cargo clippy --all-targets
   (`.sdm-scope.json`) and its check, `src/history.rs` the history,
   `src/skill.rs` the skill installer.
 - `skill/SKILL.md` and `AGENTS.md` are the skill; both are embedded in the binary.
+- [CONTRIBUTING.md](CONTRIBUTING.md) says when to raise the version (shown by
+  `sdm version`) and how to publish to crates.io. Read it before changing
+  anything.
 
 ## License
 

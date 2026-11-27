@@ -1,6 +1,6 @@
 [package]
 name = "sdm-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Command-line client for the Akeneo Supplier Data Manager (SDM) API, for people and LLM agents"

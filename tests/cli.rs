@@ -457,6 +457,15 @@ fn whoami_needs_no_scope_file() {
 }
 
 #[test]
+fn version_prints_the_crate_version_and_needs_no_scope_file() {
+    let output = sdm_in(&std::env::temp_dir(), UNREACHABLE, &["version"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let shown = String::from_utf8_lossy(&output.stdout);
+    let expected = concat!(r#""version":""#, env!("CARGO_PKG_VERSION"), r#"""#);
+    assert!(shown.contains(expected), "{shown}");
+}
+
+#[test]
 fn no_scope_does_not_lift_a_scope_that_exists() {
     let dir = scoped_dir("no-scope-flag", UNREACHABLE);
     let output = sdm_in(
