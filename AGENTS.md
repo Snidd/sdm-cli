@@ -72,7 +72,7 @@ fields are not removed.
 - Errors are JSON on stderr: the API's own body, or
   `{"status_code", "message", "errors"}` for failures inside the CLI.
 - Exit codes: `0` ok, `2` usage, `3` authentication, `4` API error, `5` network,
-  `6` outside the directory's scope.
+  `6` outside the directory's scope, or no scope file.
 - Lists are paginated: `--page`, `--page-size`, or `--all` to get every result
   as one JSON array.
 - Binary downloads need `--output <file>`.
@@ -86,7 +86,8 @@ fields are not removed.
   (`jobs bulk-delete post`, `bases delete-rows post`, `mapping memory bulk-delete post`,
   `hooks rotate-secret post`) and do not ask.
 - `sdm whoami` shows which organization the key belongs to.
-- A directory can be limited to chosen projects; see Scope below.
+- API commands only run from a directory that has a scope file, which limits
+  them to chosen projects; see Scope below.
 
 ## Scope
 
@@ -95,8 +96,14 @@ the CLI refuses, with exit code `6` and before sending anything, every request
 that is not allowed by the file. Refusals apply to `--dry-run` and `sdm api`
 too. No flag or environment variable overrides a scope.
 
+A scope file is required. Without one, every API command (`sdm api` and
+`--dry-run` included) is refused with exit code `6`, unless `--no-scope` is
+passed. `--no-scope` does nothing where a scope file exists. Do not add
+`--no-scope` to get past this refusal: tell the user, who can run `sdm scope`
+or decide that the command may run without one.
+
 ```sh
-sdm scope show    # the scope in force and its file, as JSON; null when unscoped
+sdm scope show    # the scope in force and its file, as JSON; null when there is none
 sdm scope         # choose projects and access (a person at a terminal only)
 sdm scope clear   # remove the scope file (a person at a terminal only)
 ```
@@ -129,7 +136,8 @@ Inside a scope:
   paths the spec does not list, `portals bulk-create`, `connectors akeneo`,
   `metrics xlsx`, `options get --id`, `documents`, `step-completion`,
   `job-media-archive`.
-- `login`, `logout`, `whoami`, `describe` and `spec` work as usual.
+- `login`, `logout`, `whoami`, `describe`, `spec` and `skill` work as usual,
+  and need no scope file.
 
 ### History
 
@@ -202,6 +210,26 @@ sdm api POST /some/new/path/ --data @body.json
 sdm api GET /api/v2/projects/          # other API versions: give the full path
 sdm projects get --query some_filter=value   # query parameters the spec omits
 ```
+
+## Skill
+
+This guide is also carried inside the binary as a Claude Code skill.
+
+```sh
+sdm skill install --user      # ~/.claude/skills/sdm-cli: every project of this user
+sdm skill install --project   # ./.claude/skills/sdm-cli: this project, to be committed
+sdm skill status              # JSON: each location's path and state (absent, outdated, current)
+sdm skill uninstall --user    # or --project
+```
+
+- Without `--user` or `--project` a terminal is asked; without a terminal the
+  command exits with `2`.
+- The files are plain copies. Run `install` again after upgrading `sdm`;
+  `status` says `outdated` until then.
+- A symbolic link found in the way is replaced only with `--force`, and never
+  written through.
+- At a terminal, `sdm` prints one hint per version on stderr while the skill is
+  missing or outdated. Set `SDM_NO_SKILL_HINT` to silence it.
 
 ## Keeping commands current
 

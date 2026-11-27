@@ -2,6 +2,14 @@
 name = "sdm-cli"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Command-line client for the Akeneo Supplier Data Manager (SDM) API, for people and LLM agents"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Snidd/sdm-cli"
+readme = "README.md"
+keywords = ["akeneo", "sdm", "cli", "openapi", "pim"]
+categories = ["command-line-utilities"]
+exclude = ["/.sdmhistory", "/.sdm-scope.json"]
 
 [dependencies]
 clap = { version = "4.6.7", features = ["string", "env", "cargo"] }

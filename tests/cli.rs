@@ -62,8 +62,9 @@ fn answer(
 }
 
 fn sdm(base_url: &str, args: &[&str]) -> Output {
-    // A directory with no scope file above it.
-    sdm_in(&std::env::temp_dir(), base_url, args)
+    // A directory with no scope file above it, which takes --no-scope.
+    let args: Vec<&str> = args.iter().copied().chain(["--no-scope"]).collect();
+    sdm_in(&std::env::temp_dir(), base_url, &args)
 }
 
 fn sdm_in(dir: &Path, base_url: &str, args: &[&str]) -> Output {
@@ -407,6 +408,67 @@ fn a_damaged_scope_file_refuses_everything() {
 }
 
 #[test]
+fn without_a_scope_file_requests_are_refused_and_nothing_is_sent() {
+    let unscoped = std::env::temp_dir();
+    for args in [
+        &["projects", "get"][..],
+        &["projects", "patch", "--id", "7", "--field", "name=x"],
+        &["api", "GET", "/projects/"],
+        &["projects", "get", "--dry-run"],
+    ] {
+        let output = sdm_in(&unscoped, UNREACHABLE, args);
+        // Exit 5 would mean the request was attempted.
+        assert_eq!(output.status.code(), Some(6), "{args:?}");
+        assert!(output.stdout.is_empty());
+        let message = refusal(&output);
+        assert!(message.contains("no scope file"), "{message}");
+        assert!(message.contains("sdm scope") && message.contains("--no-scope"));
+    }
+}
+
+#[test]
+fn no_scope_sends_the_request_from_a_directory_without_a_scope_file() {
+    let (base_url, requests) = serve_once(200, r#"{"id":7}"#);
+    let output = sdm_in(
+        &std::env::temp_dir(),
+        &base_url,
+        &["projects", "get", "--id", "7", "--no-scope"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        requests
+            .recv()
+            .unwrap()
+            .starts_with("GET /api/v1/projects/7/ ")
+    );
+}
+
+#[test]
+fn whoami_needs_no_scope_file() {
+    let (base_url, requests) = serve_once(200, r#"{"email":"a@example.com"}"#);
+    let output = sdm_in(&std::env::temp_dir(), &base_url, &["whoami"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        requests
+            .recv()
+            .unwrap()
+            .starts_with("GET /api/v1/users/me/ ")
+    );
+}
+
+#[test]
+fn no_scope_does_not_lift_a_scope_that_exists() {
+    let dir = scoped_dir("no-scope-flag", UNREACHABLE);
+    let output = sdm_in(
+        &dir,
+        UNREACHABLE,
+        &["projects", "get", "--id", "8", "--no-scope"],
+    );
+    assert_eq!(output.status.code(), Some(6));
+    assert!(!refusal(&output).contains("no scope file"));
+}
+
+#[test]
 fn the_scope_can_be_read_but_not_changed_without_a_terminal() {
     let dir = scoped_dir("show", UNREACHABLE);
 
@@ -486,4 +548,150 @@ fn history_can_be_moved_turned_off_and_include_reads() {
 
     assert_eq!(std::fs::read_dir(dir.join("log/sdm")).unwrap().count(), 1);
     assert!(!dir.join(".sdmhistory").exists());
+}
+
+/// A fresh working directory and Claude folder for one skill test.
+fn skill_dirs(name: &str) -> (PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!("sdm-cli-skill-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (work, claude) = (root.join("work"), root.join("claude"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(&claude).unwrap();
+    (work, claude)
+}
+
+fn sdm_skill(work: &Path, claude: &Path, args: &[&str]) -> Output {
+    let home = std::env::temp_dir().join(format!("sdm-cli-test-{}", std::process::id()));
+    Command::new(env!("CARGO_BIN_EXE_sdm"))
+        .args(args)
+        .current_dir(work)
+        .env("CLAUDE_CONFIG_DIR", claude)
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn skill_state(work: &Path, claude: &Path, location: &str) -> String {
+    let output = sdm_skill(work, claude, &["skill", "status"]);
+    assert!(output.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    status[location]["state"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn the_skill_is_installed_for_the_user_checked_and_removed() {
+    let (work, claude) = skill_dirs("user");
+    let installed = claude.join("skills/sdm-cli");
+    assert_eq!(skill_state(&work, &claude, "user"), "absent");
+
+    let output = sdm_skill(&work, &claude, &["skill", "install", "--user"]);
+    assert!(output.status.success(), "{output:?}");
+    let skill = std::fs::read_to_string(installed.join("SKILL.md")).unwrap();
+    assert!(skill.starts_with("---\nname: sdm-cli\n"));
+    assert_eq!(
+        std::fs::read_to_string(installed.join("AGENTS.md")).unwrap(),
+        include_str!("../AGENTS.md")
+    );
+    assert_eq!(skill_state(&work, &claude, "user"), "current");
+    assert_eq!(skill_state(&work, &claude, "project"), "absent");
+
+    std::fs::write(installed.join("AGENTS.md"), "an older guide").unwrap();
+    assert_eq!(skill_state(&work, &claude, "user"), "outdated");
+    assert!(
+        sdm_skill(&work, &claude, &["skill", "install", "--user"])
+            .status
+            .success()
+    );
+    assert_eq!(skill_state(&work, &claude, "user"), "current");
+
+    assert!(
+        sdm_skill(&work, &claude, &["skill", "uninstall", "--user"])
+            .status
+            .success()
+    );
+    assert!(!installed.exists());
+    assert_eq!(skill_state(&work, &claude, "user"), "absent");
+}
+
+#[test]
+fn the_skill_is_installed_into_the_current_directory() {
+    let (work, claude) = skill_dirs("project");
+    assert!(
+        sdm_skill(&work, &claude, &["skill", "install", "--project"])
+            .status
+            .success()
+    );
+    assert!(work.join(".claude/skills/sdm-cli/SKILL.md").is_file());
+    assert!(work.join(".claude/skills/sdm-cli/AGENTS.md").is_file());
+    assert!(!claude.join("skills").exists());
+    assert_eq!(skill_state(&work, &claude, "project"), "current");
+}
+
+#[test]
+fn the_skill_location_must_be_named_without_a_terminal() {
+    let (work, claude) = skill_dirs("no-terminal");
+    for verb in ["install", "uninstall"] {
+        let output = sdm_skill(&work, &claude, &["skill", verb]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("--user or --project"));
+    }
+    assert!(!claude.join("skills").exists());
+    assert!(!work.join(".claude").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linked_skill_file_is_only_replaced_on_request_and_never_written_through() {
+    let (work, claude) = skill_dirs("link");
+    let installed = claude.join("skills/sdm-cli");
+    std::fs::create_dir_all(&installed).unwrap();
+    let checkout = work.join("AGENTS.md");
+    std::fs::write(&checkout, "the checkout's guide").unwrap();
+    std::os::unix::fs::symlink(&checkout, installed.join("AGENTS.md")).unwrap();
+
+    let output = sdm_skill(&work, &claude, &["skill", "install", "--user"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--force"));
+    assert!(!installed.join("SKILL.md").exists());
+
+    let output = sdm_skill(&work, &claude, &["skill", "install", "--user", "--force"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!installed.join("AGENTS.md").is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(&checkout).unwrap(),
+        "the checkout's guide"
+    );
+    assert_eq!(skill_state(&work, &claude, "user"), "current");
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstalling_a_linked_skill_folder_leaves_its_target_alone() {
+    let (work, claude) = skill_dirs("link-dir");
+    let target = work.join("checkout");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("SKILL.md"), "kept").unwrap();
+    std::fs::create_dir_all(claude.join("skills")).unwrap();
+    std::os::unix::fs::symlink(&target, claude.join("skills/sdm-cli")).unwrap();
+
+    assert!(
+        sdm_skill(&work, &claude, &["skill", "uninstall", "--user"])
+            .status
+            .success()
+    );
+    assert!(!claude.join("skills/sdm-cli").exists());
+    assert_eq!(
+        std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+        "kept"
+    );
+}
+
+#[test]
+fn no_skill_hint_is_printed_without_a_terminal() {
+    let (work, claude) = skill_dirs("hint");
+    let output = sdm_skill(&work, &claude, &["describe", "projects"]);
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
 }

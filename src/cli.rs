@@ -10,12 +10,12 @@ use crate::credentials::{self, Credentials};
 use crate::error::{CliError, Result};
 use crate::request::{self, Body, Call, Context};
 use crate::spec::{self, API_PREFIX, Node, Operation, Spec, SpecSource, flag_name};
-use crate::{describe, output, scope};
+use crate::{describe, output, scope, skill};
 
 const DEFAULT_BASE_URL: &str = "https://sdm.akeneo.cloud";
 const GLOBAL_HEADING: &str = "Global options";
-const BUILTINS: [&str; 7] = [
-    "login", "logout", "whoami", "scope", "spec", "describe", "api",
+const BUILTINS: [&str; 8] = [
+    "login", "logout", "whoami", "scope", "spec", "skill", "describe", "api",
 ];
 
 /// Parses the process arguments and runs the selected command.
@@ -44,8 +44,8 @@ pub fn build(spec: &Spec, tree: &Node) -> Command {
              GET   /api/v1/projects/{id}/                   sdm projects get --id 3\n  \
              PATCH /api/v1/projects/{project_pk}/steps/{id}/  sdm projects steps patch --project-pk 1 --id 2\n\n\
              Output is the API's JSON on stdout; errors are JSON on stderr. Exit codes: 0 ok, \
-             2 usage, 3 authentication, 4 API error, 5 network, 6 outside the directory's scope \
-             (see `sdm scope --help`).",
+             2 usage, 3 authentication, 4 API error, 5 network, 6 outside the directory's scope, \
+             or no scope file (see `sdm scope --help`).",
         )
         .after_help(
             "Run `sdm describe` for an index of every command, and `sdm describe <command...>` \
@@ -93,6 +93,12 @@ fn global_args() -> Vec<Arg> {
                 .long("dry-run")
                 .action(ArgAction::SetTrue)
                 .help("Print the request that would be sent, without sending it"),
+        ),
+        global(
+            Arg::new("no-scope")
+                .long("no-scope")
+                .action(ArgAction::SetTrue)
+                .help("Send the request although the directory has no scope file"),
         ),
         global(
             Arg::new("yes")
@@ -184,8 +190,10 @@ fn builtin_commands() -> Vec<Command> {
                  Every write sent from a scoped directory (and reads, when asked for) is recorded in a history \
                  directory (.sdmhistory next to the scope file unless changed or turned off \
                  here), one JSON line per request, for committing.\n\n\
+                 A scope file is required: without one every API command is refused with exit \
+                 code 6, unless --no-scope is passed. `whoami` runs either way.\n\n\
                  Changing or clearing the scope needs a terminal. No flag or environment \
-                 variable overrides a scope.",
+                 variable overrides a scope; --no-scope does nothing where a scope file exists.",
             )
             .disable_help_subcommand(true)
             .subcommand(Command::new("show").about("Print the scope in force and its file as JSON"))
@@ -201,6 +209,39 @@ fn builtin_commands() -> Vec<Command> {
                     .about("Download the current spec from the host and use it from now on"),
             )
             .subcommand(Command::new("reset").about("Go back to the spec built into the binary")),
+        Command::new("skill")
+            .about("Install the Claude Code skill that teaches agents to use sdm")
+            .long_about(
+                "Install, check or remove the Claude Code skill carried inside this binary: \
+                 SKILL.md and the agent guide (AGENTS.md), written as plain files.\n\n\
+                 --user installs for every project of this user (~/.claude/skills/sdm-cli, or \
+                 under CLAUDE_CONFIG_DIR); --project installs into .claude/skills/sdm-cli in the \
+                 current directory, to be committed. Without either, a terminal is asked.\n\n\
+                 Run `sdm skill install` again after upgrading sdm to refresh the files.",
+            )
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .disable_help_subcommand(true)
+            .subcommand(
+                Command::new("install")
+                    .about("Write the skill's files (again, to update them)")
+                    .args(skill_location_args())
+                    .arg(
+                        Arg::new("force")
+                            .long("force")
+                            .action(ArgAction::SetTrue)
+                            .help("Replace a symbolic link found in the way with a copy"),
+                    ),
+            )
+            .subcommand(
+                Command::new("status")
+                    .about("Show where the skill is installed and whether it is current"),
+            )
+            .subcommand(
+                Command::new("uninstall")
+                    .about("Remove the skill's files")
+                    .args(skill_location_args()),
+            ),
         Command::new("describe")
             .about("Describe commands as JSON: parameters, body and response schemas")
             .long_about(
@@ -243,6 +284,30 @@ fn builtin_commands() -> Vec<Command> {
 
 /// Clap id of an API parameter; namespaced so it cannot clash with the CLI's
 /// own arguments.
+fn skill_location_args() -> [Arg; 2] {
+    [
+        Arg::new("user")
+            .long("user")
+            .action(ArgAction::SetTrue)
+            .conflicts_with("project")
+            .help("The user's Claude Code folder: every project"),
+        Arg::new("project")
+            .long("project")
+            .action(ArgAction::SetTrue)
+            .help("The current directory's .claude folder: this project"),
+    ]
+}
+
+fn skill_location(matches: &ArgMatches) -> Option<skill::Location> {
+    if matches.get_flag("user") {
+        Some(skill::Location::User)
+    } else if matches.get_flag("project") {
+        Some(skill::Location::Project)
+    } else {
+        None
+    }
+}
+
 fn param_id(name: &str) -> String {
     format!("param:{name}")
 }
@@ -370,10 +435,10 @@ fn dispatch(spec: &Spec, tree: &Node, matches: &ArgMatches) -> Result<()> {
     let Some((name, sub)) = matches.subcommand() else {
         return Err(CliError::usage("no command given; run `sdm --help`"));
     };
-    match name {
+    let result = match name {
         "login" => login(sub),
         "logout" => logout(),
-        "whoami" => context(sub)?.execute(&Call {
+        "whoami" => identity_context(sub)?.execute(&Call {
             method: "GET".to_owned(),
             path: format!("{API_PREFIX}/users/me/"),
             query: Vec::new(),
@@ -386,6 +451,15 @@ fn dispatch(spec: &Spec, tree: &Node, matches: &ArgMatches) -> Result<()> {
             _ => scope::configure(&unscoped_context(sub)?),
         },
         "spec" => spec_command(spec, sub),
+        "skill" => {
+            return match sub.subcommand() {
+                Some(("install", sub)) => {
+                    skill::install(skill_location(sub), sub.get_flag("force"))
+                }
+                Some(("uninstall", sub)) => skill::uninstall(skill_location(sub)),
+                _ => skill::status(),
+            };
+        }
         "describe" => {
             let tokens: Vec<String> = sub
                 .get_many::<String>("command")
@@ -396,7 +470,11 @@ fn dispatch(spec: &Spec, tree: &Node, matches: &ArgMatches) -> Result<()> {
         }
         "api" => api(sub),
         _ => dispatch_api(tree, matches, "sdm"),
+    };
+    if result.is_ok() {
+        skill::hint();
     }
+    result
 }
 
 fn dispatch_api(node: &Node, matches: &ArgMatches, prefix: &str) -> Result<()> {
@@ -530,6 +608,23 @@ fn required<'a>(matches: &'a ArgMatches, id: &str) -> Result<&'a str> {
 
 /// The context every command runs in: host, key and the directory's scope.
 fn context(matches: &ArgMatches) -> Result<Context> {
+    let scope = scope::load()?;
+    if scope.is_none() && !flag(matches, "no-scope") {
+        return Err(CliError::Scope(format!(
+            "this directory has no scope file ({}); run `sdm scope` in a terminal to choose \
+             what may be touched, or pass --no-scope to run without one",
+            scope::FILE_NAME
+        )));
+    }
+    Ok(Context {
+        scope,
+        ..unscoped_context(matches)?
+    })
+}
+
+/// Context for the calls that say nothing about a project (`login`, `whoami`,
+/// the spec download): a scope applies when there is one, and none is required.
+fn identity_context(matches: &ArgMatches) -> Result<Context> {
     Ok(Context {
         scope: scope::load()?,
         ..unscoped_context(matches)?
@@ -573,7 +668,7 @@ fn login(matches: &ArgMatches) -> Result<()> {
     let context = Context {
         token: None,
         extra_query: Vec::new(),
-        ..context(matches)?
+        ..identity_context(matches)?
     };
     let interactive = std::io::stdin().is_terminal();
     let email = match text(matches, "email") {
@@ -651,7 +746,7 @@ fn spec_command(spec: &Spec, matches: &ArgMatches) -> Result<()> {
             let context = Context {
                 token: None,
                 extra_query: Vec::new(),
-                ..context(sub)?
+                ..identity_context(sub)?
             };
             let call = Call {
                 method: "GET".to_owned(),
